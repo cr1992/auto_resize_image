@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math';
 import 'dart:typed_data';
 import 'dart:ui';
 
@@ -84,12 +85,11 @@ class AutoResizeImage extends ImageProvider<_SizeAwareCacheKey> {
       targetWidth ~/= scale;
       targetHeight ~/= scale;
     } else {
-      while (targetWidth * targetHeight * 4 > maxBytes) {
-        targetWidth >>= 1;
-        targetHeight >>= 1;
-      }
+      IntSize size = resizeWH(descriptor.width, descriptor.height, maxBytes);
+      targetWidth = size.width;
+      targetHeight = size.height;
     }
-    if (kDebugMode) {
+    if (!kReleaseMode) {
       print('origin size: ${descriptor.width}*${descriptor.height} '
           'scaled size: $targetWidth*$targetHeight'
           ' scale : ${descriptor.width ~/ targetWidth}');
@@ -99,6 +99,22 @@ class AutoResizeImage extends ImageProvider<_SizeAwareCacheKey> {
       targetHeight: targetHeight,
     );
   }
+
+  IntSize resizeWH(int width, int height, int maxSize) {
+    double ratio = width / height;
+    int maxSize_1_4 = maxSize >> 2;
+    int targetHeight = sqrt(maxSize_1_4 / ratio).floor();
+    int targetWidth = (ratio * targetHeight).floor();
+    return IntSize(targetWidth, targetHeight);
+  }
+}
+
+@immutable
+class IntSize {
+  const IntSize(this.width, this.height);
+
+  final int width;
+  final int height;
 }
 
 @immutable
