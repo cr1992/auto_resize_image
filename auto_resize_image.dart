@@ -7,22 +7,22 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 ///created by Ray on 2021.3.10
-///根据[scale]或者[maxBytes]来缩放图片，以减少内存占用
-///如果[scale]不为空则按[scale]比例来缩放图片宽高
+///根据[compressionRatio]或者[maxBytes]来缩放图片，以减少内存占用
+///如果[compressionRatio]不为空则按[compressionRatio]比例来缩放图片宽高
 ///否则按[maxBytes]最大值处理。默认500KB
 class AutoResizeImage extends ImageProvider<_SizeAwareCacheKey> {
   const AutoResizeImage(
     this.imageProvider, {
-    this.scale,
+    this.compressionRatio,
     this.maxBytes = 500 << 10,
-  }) : assert(scale != null || maxBytes != null);
+  }) : assert(compressionRatio != null || maxBytes != null);
 
   /// The [ImageProvider] that this class wraps.
   final ImageProvider imageProvider;
 
   final int maxBytes;
 
-  final double scale;
+  final double compressionRatio;
 
   @override
   ImageStreamCompleter load(_SizeAwareCacheKey key, DecoderCallback decode) {
@@ -34,7 +34,7 @@ class AutoResizeImage extends ImageProvider<_SizeAwareCacheKey> {
           'cacheWidth, cacheHeight, or allowUpscaling.');
       return instantiateImageCodec(
         bytes,
-        scale: scale,
+        compressionRatio: compressionRatio,
         maxBytes: maxBytes,
       );
     };
@@ -42,7 +42,7 @@ class AutoResizeImage extends ImageProvider<_SizeAwareCacheKey> {
         imageProvider.load(key.providerCacheKey, decodeResize);
     if (!kReleaseMode) {
       completer.debugLabel =
-          '${completer.debugLabel} - Resized(scale: ${key.scale} maxBytes${key.maxBytes})';
+          '${completer.debugLabel} - Resized(compressionRatio: ${key.compressionRatio} maxBytes${key.maxBytes})';
     }
     return completer;
   }
@@ -58,10 +58,10 @@ class AutoResizeImage extends ImageProvider<_SizeAwareCacheKey> {
         // This future has completed synchronously (completer was never assigned),
         // so we can directly create the synchronous result to return.
         result = SynchronousFuture<_SizeAwareCacheKey>(
-            _SizeAwareCacheKey(key, scale, maxBytes));
+            _SizeAwareCacheKey(key, compressionRatio, maxBytes));
       } else {
         // This future did not synchronously complete.
-        completer.complete(_SizeAwareCacheKey(key, scale, maxBytes));
+        completer.complete(_SizeAwareCacheKey(key, compressionRatio, maxBytes));
       }
     });
     if (result != null) {
@@ -75,15 +75,26 @@ class AutoResizeImage extends ImageProvider<_SizeAwareCacheKey> {
 
   Future<Codec> instantiateImageCodec(
     Uint8List list, {
-    double scale,
+    double compressionRatio,
     int maxBytes,
   }) async {
     final ImmutableBuffer buffer = await ImmutableBuffer.fromUint8List(list);
     final ImageDescriptor descriptor = await ImageDescriptor.encoded(buffer);
     int targetWidth = descriptor.width, targetHeight = descriptor.height;
-    if (scale != null) {
-      targetWidth ~/= scale;
-      targetHeight ~/= scale;
+    if (compressionRatio != null) {
+      assert(compressionRatio > 0 && compressionRatio <= 1);
+      if (compressionRatio == 1) {
+        targetWidth = descriptor.width;
+        targetHeight = descriptor.height;
+      } else {
+        IntSize size = resizeWH(
+            descriptor.width,
+            descriptor.height,
+            (descriptor.width * descriptor.height * 4 * compressionRatio)
+                .toInt());
+        targetWidth = size.width;
+        targetHeight = size.height;
+      }
     } else {
       IntSize size = resizeWH(descriptor.width, descriptor.height, maxBytes);
       targetWidth = size.width;
@@ -92,7 +103,7 @@ class AutoResizeImage extends ImageProvider<_SizeAwareCacheKey> {
     if (!kReleaseMode) {
       print('origin size: ${descriptor.width}*${descriptor.height} '
           'scaled size: $targetWidth*$targetHeight'
-          ' scale : ${descriptor.width ~/ targetWidth}');
+          ' scale : ${descriptor.width / targetWidth}');
     }
     return descriptor.instantiateCodec(
       targetWidth: targetWidth,
@@ -121,7 +132,7 @@ class IntSize {
 class _SizeAwareCacheKey {
   const _SizeAwareCacheKey(
     this.providerCacheKey,
-    this.scale,
+    this.compressionRatio,
     this.maxBytes,
   );
 
@@ -129,7 +140,7 @@ class _SizeAwareCacheKey {
 
   final int maxBytes;
 
-  final double scale;
+  final double compressionRatio;
 
   @override
   bool operator ==(Object other) {
@@ -137,9 +148,9 @@ class _SizeAwareCacheKey {
     return other is _SizeAwareCacheKey &&
         other.providerCacheKey == providerCacheKey &&
         other.maxBytes == maxBytes &&
-        other.scale == scale;
+        other.compressionRatio == compressionRatio;
   }
 
   @override
-  int get hashCode => hashValues(providerCacheKey, maxBytes, scale);
+  int get hashCode => hashValues(providerCacheKey, maxBytes, compressionRatio);
 }
