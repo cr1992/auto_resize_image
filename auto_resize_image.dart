@@ -6,43 +6,117 @@ import 'dart:ui';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
-///created by Ray on 2021.3.10
-///根据[compressionRatio]或者[maxBytes]来缩放图片，以减少内存占用
-///如果[compressionRatio]不为空则按[compressionRatio]比例来缩放图片宽高
-///否则按[maxBytes]最大值处理。默认500KB
+/// Instructs Flutter to decode the image at the specified dimensions
+/// instead of at its native size.
+///
+/// This allows finer control of the size of the image in [ImageCache] and is
+/// generally used to reduce the memory footprint of [ImageCache].
+///
+/// The decoded image may still be displayed at sizes other than the
+/// cached size provided here.
 class AutoResizeImage extends ImageProvider<_SizeAwareCacheKey> {
   const AutoResizeImage(
     this.imageProvider, {
     this.compressionRatio,
     this.maxBytes = 500 << 10,
-  }) : assert(compressionRatio != null || maxBytes != null);
+    this.width,
+    this.height,
+    this.allowUpscaling = false,
+  }) : assert((compressionRatio != null &&
+                compressionRatio > 0 &&
+                compressionRatio < 1) ||
+            (maxBytes != null && maxBytes > 0) ||
+            width != null ||
+            height != null);
 
   /// The [ImageProvider] that this class wraps.
   final ImageProvider imageProvider;
 
+  /// [ExtendedResizeImage] will compress the image to a size
+  /// that is smaller than [maxBytes]. The default size is 500KB.
   final int maxBytes;
 
+  /// The image`s size will resize to original * [compressionRatio].
+  /// It's ExtendedResizeImage`s first pick.
+  /// The compressionRatio`s range is from 0.0 (exclusive), to
+  /// 1.0 (exclusive).
   final double compressionRatio;
+
+  /// The width the image should decode to and cache.
+  final int width;
+
+  /// The height the image should decode to and cache.
+  final int height;
+
+  /// Whether the [width] and [height] parameters should be clamped to the
+  /// intrinsic width and height of the image.
+  ///
+  /// In general, it is better for memory usage to avoid scaling the image
+  /// beyond its intrinsic dimensions when decoding it. If there is a need to
+  /// scale an image larger, it is better to apply a scale to the canvas, or
+  /// to use an appropriate [Image.fit].
+  final bool allowUpscaling;
+
+  /// Composes the `provider` in a [ResizeImage] only when `cacheWidth` and
+  /// `cacheHeight` are not both null.
+  ///
+  /// When `cacheWidth` and `cacheHeight` are both null, this will return the
+  /// `provider` directly.
+  ///
+  /// Extended with `scaling` and `maxBytes`.
+  static ImageProvider<Object> resizeIfNeeded({
+    @required ImageProvider<Object> provider,
+    int cacheWidth,
+    int cacheHeight,
+    double compressionRatio,
+    int maxBytes,
+  }) {
+    if ((compressionRatio != null &&
+            compressionRatio > 0 &&
+            compressionRatio < 1) ||
+        (maxBytes != null && maxBytes > 0) ||
+        cacheWidth != null ||
+        cacheHeight != null) {
+      return AutoResizeImage(
+        provider,
+        width: cacheWidth,
+        height: cacheHeight,
+        maxBytes: maxBytes,
+        compressionRatio: compressionRatio,
+      );
+    }
+    return provider;
+  }
 
   @override
   ImageStreamCompleter load(_SizeAwareCacheKey key, DecoderCallback decode) {
-    final DecoderCallback decodeResize = (Uint8List bytes,
-        {int cacheWidth, int cacheHeight, bool allowUpscaling}) {
+    final DecoderCallback decodeResize = (
+      Uint8List bytes, {
+      int cacheWidth,
+      int cacheHeight,
+      bool allowUpscaling,
+    }) {
       assert(
-          cacheWidth == null && cacheHeight == null && allowUpscaling == null,
-          'ResizeImage cannot be composed with another ImageProvider that applies '
-          'cacheWidth, cacheHeight, or allowUpscaling.');
-      return instantiateImageCodec(
+        cacheWidth == null && cacheHeight == null && allowUpscaling == null,
+        'ResizeImage cannot be composed with another ImageProvider that applies '
+        'cacheWidth, cacheHeight, or allowUpscaling.',
+      );
+      return _instantiateImageCodec(
         bytes,
         compressionRatio: compressionRatio,
         maxBytes: maxBytes,
+        targetWidth: width,
+        targetHeight: height,
       );
     };
-    final ImageStreamCompleter completer =
-        imageProvider.load(key.providerCacheKey, decodeResize);
+    final ImageStreamCompleter completer = imageProvider.load(
+      key.providerCacheKey,
+      decodeResize,
+    );
     if (!kReleaseMode) {
       completer.debugLabel =
-          '${completer.debugLabel} - Resized(compressionRatio: ${key.compressionRatio} maxBytes${key.maxBytes})';
+          '${completer.debugLabel} - Resized(compressionRatio:'
+          ' ${key.compressionRatio} maxBytes:${key.maxBytes} size:${key.width}*${key.height})';
     }
     return completer;
   }
@@ -58,10 +132,11 @@ class AutoResizeImage extends ImageProvider<_SizeAwareCacheKey> {
         // This future has completed synchronously (completer was never assigned),
         // so we can directly create the synchronous result to return.
         result = SynchronousFuture<_SizeAwareCacheKey>(
-            _SizeAwareCacheKey(key, compressionRatio, maxBytes));
+            _SizeAwareCacheKey(key, compressionRatio, maxBytes, width, height));
       } else {
         // This future did not synchronously complete.
-        completer.complete(_SizeAwareCacheKey(key, compressionRatio, maxBytes));
+        completer.complete(
+            _SizeAwareCacheKey(key, compressionRatio, maxBytes, width, height));
       }
     });
     if (result != null) {
@@ -73,37 +148,38 @@ class AutoResizeImage extends ImageProvider<_SizeAwareCacheKey> {
     return completer.future;
   }
 
-  Future<Codec> instantiateImageCodec(
+  Future<Codec> _instantiateImageCodec(
     Uint8List list, {
     double compressionRatio,
     int maxBytes,
+    int targetWidth,
+    int targetHeight,
   }) async {
     final ImmutableBuffer buffer = await ImmutableBuffer.fromUint8List(list);
     final ImageDescriptor descriptor = await ImageDescriptor.encoded(buffer);
-    int targetWidth = descriptor.width, targetHeight = descriptor.height;
     if (compressionRatio != null) {
-      assert(compressionRatio > 0 && compressionRatio <= 1);
-      if (compressionRatio == 1) {
-        targetWidth = descriptor.width;
-        targetHeight = descriptor.height;
-      } else {
-        IntSize size = resizeWH(
-            descriptor.width,
-            descriptor.height,
-            (descriptor.width * descriptor.height * 4 * compressionRatio)
-                .toInt());
-        targetWidth = size.width;
-        targetHeight = size.height;
-      }
-    } else {
-      IntSize size = resizeWH(descriptor.width, descriptor.height, maxBytes);
+      final _IntSize size = _resize(
+        descriptor.width,
+        descriptor.height,
+        (descriptor.width * descriptor.height * 4 * compressionRatio).toInt(),
+      );
       targetWidth = size.width;
       targetHeight = size.height;
-    }
-    if (!kReleaseMode) {
-      print('origin size: ${descriptor.width}*${descriptor.height} '
-          'scaled size: $targetWidth*$targetHeight'
-          ' scale : ${descriptor.width / targetWidth}');
+    } else if (maxBytes != null) {
+      final _IntSize size = _resize(
+        descriptor.width,
+        descriptor.height,
+        maxBytes,
+      );
+      targetWidth = size.width;
+      targetHeight = size.height;
+    } else if (!allowUpscaling) {
+      if (targetWidth != null && targetWidth > descriptor.width) {
+        targetWidth = descriptor.width;
+      }
+      if (targetHeight != null && targetHeight > descriptor.height) {
+        targetHeight = descriptor.height;
+      }
     }
     return descriptor.instantiateCodec(
       targetWidth: targetWidth,
@@ -111,18 +187,23 @@ class AutoResizeImage extends ImageProvider<_SizeAwareCacheKey> {
     );
   }
 
-  IntSize resizeWH(int width, int height, int maxSize) {
-    double ratio = width / height;
-    int maxSize_1_4 = maxSize >> 2;
-    int targetHeight = sqrt(maxSize_1_4 / ratio).floor();
-    int targetWidth = (ratio * targetHeight).floor();
-    return IntSize(targetWidth, targetHeight);
+  /// Calculate fittest size.
+  /// [width] The image's original width.
+  /// [height] The image's original height.
+  /// [maxBytes] The size that image will resize to.
+  ///
+  _IntSize _resize(int width, int height, int maxBytes) {
+    final double ratio = width / height;
+    final int maxSize_1_4 = maxBytes >> 2;
+    final int targetHeight = sqrt(maxSize_1_4 / ratio).floor();
+    final int targetWidth = (ratio * targetHeight).floor();
+    return _IntSize(targetWidth, targetHeight);
   }
 }
 
 @immutable
-class IntSize {
-  const IntSize(this.width, this.height);
+class _IntSize {
+  const _IntSize(this.width, this.height);
 
   final int width;
   final int height;
@@ -134,6 +215,8 @@ class _SizeAwareCacheKey {
     this.providerCacheKey,
     this.compressionRatio,
     this.maxBytes,
+    this.width,
+    this.height,
   );
 
   final Object providerCacheKey;
@@ -142,15 +225,29 @@ class _SizeAwareCacheKey {
 
   final double compressionRatio;
 
+  final int width;
+
+  final int height;
+
   @override
   bool operator ==(Object other) {
-    if (other.runtimeType != runtimeType) return false;
+    if (other.runtimeType != runtimeType) {
+      return false;
+    }
     return other is _SizeAwareCacheKey &&
         other.providerCacheKey == providerCacheKey &&
         other.maxBytes == maxBytes &&
-        other.compressionRatio == compressionRatio;
+        other.compressionRatio == compressionRatio &&
+        other.width == width &&
+        other.height == height;
   }
 
   @override
-  int get hashCode => hashValues(providerCacheKey, maxBytes, compressionRatio);
+  int get hashCode => hashValues(
+        providerCacheKey,
+        maxBytes,
+        compressionRatio,
+        width,
+        height,
+      );
 }
